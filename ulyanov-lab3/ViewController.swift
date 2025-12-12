@@ -16,20 +16,19 @@ class ViewController: UIViewController {
         
         let slider = CircularSlider()
         slider.translatesAutoresizingMaskIntoConstraints = false
-        slider.backgroundColor = .clear
-        slider.addTarget(self, action: #selector(valueChanged), for: .valueChanged)
         view.addSubview(slider)
         
         NSLayoutConstraint.activate([
-            slider.widthAnchor.constraint(equalToConstant: 300),
-            slider.heightAnchor.constraint(equalToConstant: 300),
             slider.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            slider.centerYAnchor.constraint(equalTo: view.centerYAnchor)
+            slider.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            slider.widthAnchor.constraint(equalToConstant: 300),
+            slider.heightAnchor.constraint(equalToConstant: 300)
         ])
+        
+        slider.addTarget(self, action: #selector(handle), for: .valueChanged)
     }
     
-    @objc func valueChanged(_ sender: CircularSlider) {
+    @objc func handle(_ sender: CircularSlider) {
         print(sender.value)
     }
 }
-
