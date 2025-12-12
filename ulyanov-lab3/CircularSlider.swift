@@ -10,149 +10,242 @@ import UIKit
 class CircularSlider: UIControl {
     
     // MARK: - Public properties
-    var startAngle: CGFloat = -.pi * 3/4        // левая граница дуги
-    var endAngle: CGFloat = .pi * 3/4           // правая граница дуги
-    var lineWidth: CGFloat = 25
-    
-    var tickCount: Int = 20                     // количество делений
-    var tickLength: CGFloat = 8
-    var tickColor: UIColor = UIColor.gray.withAlphaComponent(0.6)
-    
-    /// Текущее значение 0...1
-    var value: CGFloat = 0.4 {
+    var value: CGFloat = 0.5 {
         didSet {
-            setNeedsDisplay()
+            // ограничим [0,1] на всякий случай
+            value = min(max(0, value), 1)
+            updateLayers()
             sendActions(for: .valueChanged)
         }
     }
     
-    // MARK: - Touch handling
-    override func beginTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
-        updateValue(with: touch)
-        return true
-    }
-    
-    override func continueTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
-        updateValue(with: touch)
-        return true
-    }
-    
-    private func updateValue(with touch: UITouch) {
-        let point = touch.location(in: self)
-        let center = CGPoint(x: bounds.midX, y: bounds.midY)
-        let dx = point.x - center.x
-        let dy = point.y - center.y
-        
-        var angle = atan2(dy, dx)
-        
-        // Нормируем угол в диапазон startAngle...endAngle
-        if angle < startAngle - .pi { angle += 2 * .pi }
-        if angle > endAngle + .pi { angle -= 2 * .pi }
+    var lineWidth: CGFloat = 24
+    var startAngle: CGFloat = -.pi * 3/4
+    var endAngle: CGFloat =  .pi * 3/4
 
-        let totalAngle = endAngle - startAngle
-        let clamped = max(startAngle, min(endAngle, angle))
+    // MARK: - Layers
+    private let brightGradient = CAGradientLayer()
+    private let paleGradient = CAGradientLayer()
+    
+    private let brightMask = CAShapeLayer()
+    private let paleMask = CAShapeLayer()
+    
+    private let needleLayer = CAShapeLayer()
+    private let tickLayer = CAShapeLayer()
+
+    // MARK: - Animation helpers
+    private var displayLink: CADisplayLink?
+    private var animStartValue: CGFloat = 0
+    private var animTargetValue: CGFloat = 0
+    private var animStartTime: CFTimeInterval = 0
+    private var animDuration: CFTimeInterval = 0
+
+    // MARK: - Init
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        setupLayers()
+    }
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupLayers()
+    }
+    
+    deinit {
+        stopAnimation()
+    }
+    
+    // MARK: - Layer Setup
+    private func setupLayers() {
+        layer.addSublayer(paleGradient)
+        paleGradient.mask = paleMask
         
-        value = (clamped - startAngle) / totalAngle
+        layer.addSublayer(brightGradient)
+        brightGradient.mask = brightMask
+        
+        layer.addSublayer(tickLayer)
+        layer.addSublayer(needleLayer)
+        
+        // Gradient colors
+        brightGradient.colors = [
+            UIColor.blue.cgColor,
+            UIColor.green.cgColor
+        ]
+        paleGradient.colors = [
+            UIColor.green.withAlphaComponent(0.3).cgColor,
+            UIColor.red.withAlphaComponent(0.3).cgColor
+        ]
+        
+        tickLayer.strokeColor = UIColor.lightGray.cgColor
+        tickLayer.lineWidth = 2
+        tickLayer.fillColor = UIColor.clear.cgColor
+        needleLayer.strokeColor = UIColor.darkGray.cgColor
+        needleLayer.lineWidth = 4
+        needleLayer.lineCap = .round
     }
 
-    // MARK: - Drawing
-    override func draw(_ rect: CGRect) {
-        let ctx = UIGraphicsGetCurrentContext()!
-        let radius = min(bounds.width, bounds.height)/2 - lineWidth
+    override func layoutSubviews() {
+        super.layoutSubviews()
         
+        brightGradient.frame = bounds
+        paleGradient.frame = bounds
+        
+        drawTicks()
+        updateLayers()
+    }
+
+    // MARK: - Drawing Layers
+    private func updateLayers() {
         let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        let radius = min(bounds.width, bounds.height) / 2 - lineWidth/2
+        
         let totalAngle = endAngle - startAngle
-        let currentAngle = startAngle + value * totalAngle
+        let angle = startAngle + totalAngle * value
         
-        // ---- Background arc (after needle) — pale
-        drawArc(ctx: ctx,
-                center: center,
-                radius: radius,
-                from: currentAngle,
-                to: endAngle,
-                colors: [UIColor.systemGreen.withAlphaComponent(0.3),
-                         UIColor.systemRed.withAlphaComponent(0.3)])
+        // --- Paths for masks ---
+        let brightPath = UIBezierPath(
+            arcCenter: center,
+            radius: radius,
+            startAngle: startAngle,
+            endAngle: angle,
+            clockwise: true
+        )
         
-        // ---- Foreground arc (before needle) — more vivid
-        drawArc(ctx: ctx,
-                center: center,
-                radius: radius,
-                from: startAngle,
-                to: currentAngle,
-                colors: [UIColor.systemBlue,
-                         UIColor.systemGreen])
+        let palePath = UIBezierPath(
+            arcCenter: center,
+            radius: radius,
+            startAngle: angle,
+            endAngle: endAngle,
+            clockwise: true
+        )
         
-        drawTicks(ctx: ctx, center: center, radius: radius + lineWidth/2)
-        drawNeedle(ctx: ctx, center: center, radius: radius + lineWidth/2)
+        brightMask.path = brightPath.cgPath
+        brightMask.lineWidth = lineWidth
+        brightMask.strokeColor = UIColor.black.cgColor
+        brightMask.fillColor = UIColor.clear.cgColor
+        brightMask.lineCap = .round
+        
+        paleMask.path = palePath.cgPath
+        paleMask.lineWidth = lineWidth
+        paleMask.strokeColor = UIColor.black.cgColor
+        paleMask.fillColor = UIColor.clear.cgColor
+        paleMask.lineCap = .round
+        
+        // --- Needle ---
+        let needlePath = UIBezierPath()
+        let endPoint = CGPoint(
+            x: center.x + cos(angle) * (radius + lineWidth/2),
+            y: center.y + sin(angle) * (radius + lineWidth/2)
+        )
+        needlePath.move(to: center)
+        needlePath.addLine(to: endPoint)
+        needleLayer.path = needlePath.cgPath
     }
-    
-    private func drawArc(ctx: CGContext,
-                         center: CGPoint,
-                         radius: CGFloat,
-                         from: CGFloat,
-                         to: CGFloat,
-                         colors: [UIColor]) {
+
+
+    // MARK: - Ticks
+    private func drawTicks() {
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        let radius = min(bounds.width, bounds.height) / 2 - lineWidth/2
         
-        let path = UIBezierPath(arcCenter: center,
-                                radius: radius,
-                                startAngle: from,
-                                endAngle: to,
-                                clockwise: true)
-        
-        ctx.saveGState()
-        ctx.addPath(path.cgPath)
-        ctx.setLineWidth(lineWidth)
-        ctx.replacePathWithStrokedPath()
-        ctx.clip()
-        
-        // gradient
-        let cgColors = colors.map { $0.cgColor } as CFArray
-        let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
-                                  colors: cgColors,
-                                  locations: nil)!
-        
-        ctx.drawLinearGradient(gradient,
-                               start: CGPoint(x: 0, y: 0),
-                               end: CGPoint(x: bounds.width, y: bounds.height),
-                               options: [])
-        
-        ctx.restoreGState()
-    }
-    
-    private func drawTicks(ctx: CGContext, center: CGPoint, radius: CGFloat) {
-        let angleStep = (endAngle - startAngle) / CGFloat(tickCount - 1)
-        
-        ctx.saveGState()
-        ctx.setStrokeColor(tickColor.cgColor)
-        ctx.setLineWidth(2)
+        let tickCount = 18
+        let path = UIBezierPath()
         
         for i in 0..<tickCount {
-            let angle = startAngle + angleStep * CGFloat(i)
-            let start = CGPoint(x: center.x + cos(angle) * (radius - tickLength),
-                                y: center.y + sin(angle) * (radius - tickLength))
-            let end = CGPoint(x: center.x + cos(angle) * (radius),
-                              y: center.y + sin(angle) * (radius))
-            ctx.move(to: start)
-            ctx.addLine(to: end)
+            let t = CGFloat(i) / CGFloat(tickCount - 1)
+            let angle = startAngle + (endAngle - startAngle) * t
+            
+            let p1 = CGPoint(x: center.x + cos(angle) * (radius - 6),
+                y: center.y + sin(angle) * (radius - 6)
+            )
+            let p2 = CGPoint(
+                x: center.x + cos(angle) * radius,
+                y: center.y + sin(angle) * radius
+            )
+            path.move(to: p1)
+            path.addLine(to: p2)
         }
         
-        ctx.strokePath()
-        ctx.restoreGState()
+        tickLayer.path = path.cgPath
+        tickLayer.fillColor = UIColor.clear.cgColor
+    }
+
+    // MARK: - Touch handling
+    override func beginTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
+        // При первом касании — анимируем иглу до места клика
+        updateValue(touch, animated: true)
+        return true
+    }
+    override func continueTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
+        // Во время перетаскивания — прерываем анимацию и двигаем сразу
+        stopAnimation()
+        updateValue(touch, animated: false)
+        return true
     }
     
-    private func drawNeedle(ctx: CGContext, center: CGPoint, radius: CGFloat) {
-        let totalAngle = endAngle - startAngle
-        let angle = startAngle + value * totalAngle
+    // animated: true — запустить плавную интерполяцию value (и дуги) до целевого значения
+    private func updateValue(_ touch: UITouch, animated: Bool) {
+        let pt = touch.location(in: self)
+        let c = CGPoint(x: bounds.midX, y: bounds.midY)
+        let dx = pt.x - c.x
+        let dy = pt.y - c.y
         
-        let endPoint = CGPoint(x: center.x + cos(angle) * radius,
-                               y: center.y + sin(angle) * radius)
+        var ang = atan2(dy, dx)
         
-        ctx.saveGState()
-        ctx.setLineWidth(4)
-        ctx.setStrokeColor(UIColor.darkGray.cgColor)
-        ctx.move(to: center)
-        ctx.addLine(to: endPoint)
-        ctx.strokePath()
-        ctx.restoreGState()
+        // Нормализация под дугу: если угол меньше start, пробуем добавить 2π, чтобы попасть в интервал
+        if ang < startAngle { ang += 2 * .pi }
+        
+        // Ограничим по рамкам дуги
+        let clampedAngle = max(startAngle, min(endAngle, ang))
+        let targetValue = (clampedAngle - startAngle) / (endAngle - startAngle)
+        
+        if animated {
+            animateToValue(targetValue)
+        } else {
+            value = targetValue
+        }
+    }
+    
+    // MARK: - Animation (CADisplayLink interpolation)
+    private func animateToValue(_ target: CGFloat) {
+        stopAnimation()
+        
+        let current = value
+        guard abs(current - target) > 0.0001 else { return } // ничего не делать, если уже на месте
+        
+        animStartValue = current
+        animTargetValue = min(max(0, target), 1)
+        animStartTime = CACurrentMediaTime()
+        
+        // Длительность пропорциональна расстоянию (можно подстроить)
+        let distance = abs(Double(animTargetValue - animStartValue))
+        animDuration = 0.25 + distance * 0.5 // от 0.25 до ~0.75s
+        
+        displayLink = CADisplayLink(target: self, selector: #selector(stepAnimation))
+        displayLink?.add(to: .main, forMode: .common)
+    }
+    
+    @objc private func stepAnimation() {
+        let now = CACurrentMediaTime()
+        let tRaw = (now - animStartTime) / animDuration
+        if tRaw >= 1.0 {
+            // завершили
+            value = animTargetValue
+            stopAnimation()
+            return
+        }
+        let t = CGFloat(tRaw)
+        let eased = easeOutCubic(t)
+        let newValue = animStartValue + (animTargetValue - animStartValue) * eased
+        // обновляем значение — это вызовет updateLayers()
+        value = newValue
+    }
+    
+    private func stopAnimation() {
+        displayLink?.invalidate()
+        displayLink = nil
+    }
+    
+    private func easeOutCubic(_ t: CGFloat) -> CGFloat {
+        return 1 - pow(1 - t, 3)
     }
 }
